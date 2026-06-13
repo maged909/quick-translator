@@ -1,0 +1,11 @@
+# Per-user runtime state (created on first run)
+settings.json
+history.json
+
+# Stale / scratch build artifacts
+QuickTranslator_new.exe
+
+# Common
+*.log
+Thumbs.db
+desktop.ini
