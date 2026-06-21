@@ -94,6 +94,9 @@ namespace QuickTranslator
         [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern bool UnhookWindowsHookEx(IntPtr hhk);
         [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
         [DllImport("kernel32.dll", CharSet = CharSet.Auto)] public static extern IntPtr GetModuleHandle(string name);
+        [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")] public static extern bool PostThreadMessage(uint threadId, uint msg, IntPtr wParam, IntPtr lParam);
+        public const uint WM_QUIT = 0x0012;
 
         public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
         [StructLayout(LayoutKind.Sequential)]
@@ -797,8 +800,10 @@ namespace QuickTranslator
         TableLayoutPanel grid;
         FlowLayoutPanel variants;
         int varRow, romRow;
+        List<string> lastAlts;   // remembered so the wrapped-chip height can be recomputed at any width
         public bool CloseOnCopy = true;
         public Action OnCloseRequested;
+        public Action OnContentChanged;   // fired when the shown text changes (so a host can resize to fit)
 
         // picker overlay
         Panel picker;
@@ -871,7 +876,7 @@ namespace QuickTranslator
             grid.Controls.Add(romLbl, 0, 6); romRow = 6;
 
             variants = new FlowLayoutPanel(); variants.Dock = DockStyle.Fill; variants.BackColor = Theme.Bg;
-            variants.WrapContents = false; variants.AutoScroll = true; variants.Margin = new Padding(0); variants.Padding = new Padding(0);
+            variants.WrapContents = true; variants.AutoScroll = false; variants.Margin = new Padding(0); variants.Padding = new Padding(0);
             grid.Controls.Add(variants, 0, 7); varRow = 7;
 
             bar = new LoadingBar(); bar.Dock = DockStyle.Fill; bar.Margin = new Padding(2, 1, 2, 1);
@@ -1064,7 +1069,54 @@ namespace QuickTranslator
             UpdateLangButtons(); src.Box.Text = srcText == null ? "" : srcText; DoTranslate();
         }
         public void SetSource(string t) { src.Box.Text = t == null ? "" : t; }
-        public void ClearAll() { src.Box.Clear(); res.Box.Clear(); lblStatus.Text = "Type text, press Enter."; bar.Stop(); ShowVariants(null); ShowRom(null); }
+        public void ClearAll() { src.Box.Clear(); res.Box.Clear(); lblStatus.Text = "Type text, press Enter."; bar.Stop(); ShowVariants(null); ShowRom(null); Changed(); }
+        void Changed() { if (OnContentChanged != null) OnContentChanged(); }
+
+        // Compute the client size the panel would like, given the host's allowed range, and
+        // lay the boxes out to match: width follows the longest line of text, height follows
+        // the wrapped text. The grid's two expanding rows are switched to content-proportional
+        // weights so neither box is starved.
+        public Size AutoLayout(int minClientW, int maxClientW, int maxClientH)
+        {
+            int sidePad = Padding.Left + Padding.Right;
+            int chrome = 19 + 18;                          // input padding (19) + scrollbar (18)
+            Font f = Theme.F(11f);
+
+            int longest = Math.Max(LongestLine(src.Box.Text, f), LongestLine(res.Box.Text, f));
+            int wantW = longest + sidePad + chrome;
+            int clientW = Math.Max(minClientW, Math.Min(wantW, maxClientW));
+
+            int innerW = clientW - sidePad - chrome;
+            if (innerW < 120) innerW = 120;
+            int srcH = Math.Max(54, TextH(src.Box.Text, f, innerW));
+            int resH = Math.Max(54, TextH(res.Box.Text, f, innerW));
+            grid.RowStyles[1].Height = srcH;
+            grid.RowStyles[5].Height = resH;
+
+            int varH = VarHeight(clientW - sidePad);
+            grid.RowStyles[varRow].Height = varH;
+            int rom = grid.RowStyles[romRow].Height > 0 ? 22 : 0;
+            int fixedRows = 26 + 52 + 40 + 26 + 6 + 18;    // src header, langs, actions, res header, bar, status
+            int wantH = fixedRows + srcH + resH + rom + varH + Padding.Top + Padding.Bottom;
+            return new Size(clientW, Math.Min(wantH, maxClientH));
+        }
+        static int TextH(string t, Font f, int w)
+        {
+            if (string.IsNullOrEmpty(t)) return 0;
+            Size sz = TextRenderer.MeasureText(t, f, new Size(w, int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
+            return sz.Height + 18;   // input vertical padding
+        }
+        static int LongestLine(string t, Font f)
+        {
+            if (string.IsNullOrEmpty(t)) return 0;
+            int max = 0;
+            foreach (var line in t.Split('\n'))
+            {
+                int w = TextRenderer.MeasureText(line.TrimEnd('\r'), f, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPrefix).Width;
+                if (w > max) max = w;
+            }
+            return max;
+        }
         public void FocusSource() { src.Box.Focus(); }
         public void CopyResult()
         {
@@ -1099,7 +1151,7 @@ namespace QuickTranslator
             string text = src.Box.Text;
             if (cts != null) { cts.Cancel(); }
             ShowVariants(null); ShowRom(null);
-            if (text == null || text.Trim().Length == 0) { res.Box.Clear(); lblStatus.Text = "Ready."; bar.Stop(); return; }
+            if (text == null || text.Trim().Length == 0) { res.Box.Clear(); lblStatus.Text = "Ready."; bar.Stop(); Changed(); return; }
             lblStatus.Text = "Translating…"; bar.Start();
             var myCts = new CancellationTokenSource(); cts = myCts;
             string eng = Config.S.Engine; string sl = Lang.Of(From); string tl = Lang.Of(To);
@@ -1117,6 +1169,7 @@ namespace QuickTranslator
             }
             else lblStatus.Text = From + "   →   " + To + "    (" + eng + ")";
             ShowVariants(r.Alts);
+            Changed();
             bool ok = !string.IsNullOrEmpty(r.Text) && r.Text[0] != '[';
             if (ok && Config.S.AutoCopy) Clip.SetText(r.Text);
             if (ok && Config.S.KeepHistory) Hist.Add(text, r.Text, From, To, eng);
@@ -1132,8 +1185,9 @@ namespace QuickTranslator
         {
             if (variants == null) return;
             variants.Controls.Clear();
-            if (alts == null || alts.Count == 0 || !Config.S.ShowVariants) { grid.RowStyles[varRow].Height = 0; return; }
-            foreach (var a in alts)
+            lastAlts = (alts != null && alts.Count > 0 && Config.S.ShowVariants) ? alts : null;
+            if (lastAlts == null) { grid.RowStyles[varRow].Height = 0; return; }
+            foreach (var a in lastAlts)
             {
                 var chip = new RButton(); chip.Text = a; chip.Fill = Theme.Card2; chip.Hover = Theme.Accent; chip.Radius = 13;
                 chip.Font = Theme.F(9f); chip.AutoSize = false; chip.Height = 26;
@@ -1143,7 +1197,22 @@ namespace QuickTranslator
                 chip.Click += delegate { res.Box.Text = val; };
                 variants.Controls.Add(chip);
             }
-            grid.RowStyles[varRow].Height = 34;
+            grid.RowStyles[varRow].Height = VarHeight(Width - Padding.Left - Padding.Right);   // grow the row to fit wrapped chips
+        }
+        // Height needed for the alternative chips when they wrap into multiple rows at the given width.
+        int VarHeight(int availW)
+        {
+            if (lastAlts == null) return 0;
+            if (availW < 60) availW = 60;
+            Font f = Theme.F(9f);
+            int x = 0, rows = 1;
+            foreach (var a in lastAlts)
+            {
+                int w = Math.Min(TextRenderer.MeasureText(a, f).Width + 22, 260);
+                if (x > 0 && x + w > availW) { rows++; x = 0; }
+                x += w + 6;
+            }
+            return rows * 30 + 4;   // 26px chip + 4px vertical margins per row
         }
     }
 
@@ -1255,6 +1324,7 @@ namespace QuickTranslator
             BackColor = Theme.Bg; ForeColor = Theme.Text; ShowInTaskbar = true; TopMost = true; KeyPreview = true;
             panel = new TranslatorPanel(true); panel.Dock = DockStyle.Fill; panel.CloseOnCopy = true;
             panel.OnCloseRequested = delegate { CloseAndPaste(); };
+            panel.OnContentChanged = delegate { AutoFit(); };
             Controls.Add(panel);
             KeyDown += delegate (object s, KeyEventArgs e)
             {
@@ -1274,6 +1344,7 @@ namespace QuickTranslator
             typeMode = !has;   // only auto-paste on close when the user typed (not when they translated a selection)
             if (has) { panel.SetLangs(Config.S.SelFrom, Config.S.SelTo); panel.SetSource(sel); }
             else { panel.SetLangs(Config.S.TypeFrom, Config.S.TypeTo); panel.ClearAll(); }
+            AutoFit();        // open already sized to the source text (translation will re-fit when it lands)
             ShowFront();
             if (has) panel.DoTranslate(); else panel.FocusSource();
         }
@@ -1290,6 +1361,32 @@ namespace QuickTranslator
             // real open is instant (no cold-start lag).
             Location = new Point(-32000, -32000);
             Show(); Application.DoEvents(); Hide();
+        }
+        void AutoFit()
+        {
+            if (IsDisposed) return;
+            Point center = Visible ? new Point(Left + Width / 2, Top + Height / 2) : Cursor.Position;
+            Rectangle wa = Screen.FromPoint(center).WorkingArea;
+            int chromeW = Width - ClientSize.Width;                   // borders
+            int chromeH = Height - ClientSize.Height;                 // title bar + borders
+            int minClientW = MinimumSize.Width - chromeW;
+            int minClientH = MinimumSize.Height - chromeH;
+            int maxClientW = (int)(wa.Width * 0.8) - chromeW;
+            int maxClientH = (int)(wa.Height * 0.9) - chromeH;
+            Size want = panel.AutoLayout(minClientW, maxClientW, maxClientH);
+            int w = Math.Max(minClientW, Math.Min(want.Width, maxClientW));
+            int h = Math.Max(minClientH, Math.Min(want.Height, maxClientH));
+            if (Math.Abs(w - ClientSize.Width) <= 2 && Math.Abs(h - ClientSize.Height) <= 2) return;
+            ClientSize = new Size(w, h);
+            if (Visible)                                              // keep the grown window fully on screen
+            {
+                int left = Left, top = Top;
+                if (left + Width > wa.Right) left = wa.Right - Width;
+                if (left < wa.Left) left = wa.Left;
+                if (top + Height > wa.Bottom) top = wa.Bottom - Height;
+                if (top < wa.Top) top = wa.Top;
+                if (left != Left || top != Top) Location = new Point(left, top);
+            }
         }
         void ShowFront()
         {
@@ -1581,6 +1678,9 @@ namespace QuickTranslator
         MainForm main;
         IntPtr hookId = IntPtr.Zero;
         Native.LowLevelKeyboardProc hookProc;
+        Thread hookThread;
+        volatile uint hookThreadId;
+        System.Windows.Forms.Timer watchdog;
 
         public TrayContext(string startArg)
         {
@@ -1608,9 +1708,36 @@ namespace QuickTranslator
 
         void InstallHook()
         {
+            // The low-level keyboard hook runs on its OWN thread with a dedicated message
+            // loop. Windows silently removes a LL hook whose owning thread doesn't service
+            // the callback within LowLevelHooksTimeout (~300ms). The UI thread regularly
+            // blocks (GrabSelection sleeps, translations, dialogs) — which used to get the
+            // hook killed, so the hotkey "stopped working until restart". A dedicated thread
+            // that does nothing but pump messages always answers in time.
+            hookThread = new Thread(HookThreadProc);
+            hookThread.IsBackground = true;
+            hookThread.Name = "QT-Hotkey-Hook";
+            hookThread.Start();
+
+            // Watchdog: if the hook thread ever dies for any reason, bring it back.
+            if (watchdog == null)
+            {
+                watchdog = new System.Windows.Forms.Timer();
+                watchdog.Interval = 5000;
+                watchdog.Tick += delegate { if (hookThread == null || !hookThread.IsAlive) InstallHook(); };
+                watchdog.Start();
+            }
+        }
+        void HookThreadProc()
+        {
             hookProc = HookCallback;
             using (var mod = System.Diagnostics.Process.GetCurrentProcess().MainModule)
                 hookId = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, hookProc, Native.GetModuleHandle(mod.ModuleName), 0);
+            hookThreadId = Native.GetCurrentThreadId();
+            Application.Run();   // pump messages so the hook callback is always serviced promptly
+            try { if (hookId != IntPtr.Zero) Native.UnhookWindowsHookEx(hookId); } catch { }
+            hookId = IntPtr.Zero;
+            hookThreadId = 0;
         }
         IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
@@ -1724,7 +1851,8 @@ namespace QuickTranslator
 
         void ExitApp()
         {
-            try { if (hookId != IntPtr.Zero) Native.UnhookWindowsHookEx(hookId); } catch { }
+            try { if (watchdog != null) watchdog.Stop(); } catch { }
+            try { uint tid = hookThreadId; if (tid != 0) Native.PostThreadMessage(tid, Native.WM_QUIT, IntPtr.Zero, IntPtr.Zero); } catch { }
             try { tray.Visible = false; tray.Dispose(); } catch { }
             Environment.Exit(0);
         }
