@@ -438,6 +438,31 @@ namespace QuickTranslator
             try { foreach (var v in S().GetInstalledVoices()) if (v.Enabled) list.Add(v.VoiceInfo.Name); } catch { }
             return list.ToArray();
         }
+        public const string AutoVoice = "Automatic — best voice per language";
+        // Each entry: [voiceName, languageDisplay] e.g. ["Microsoft Hoda", "Arabic (Egypt)"].
+        public static List<string[]> VoiceInfos()
+        {
+            var list = new List<string[]>();
+            try
+            {
+                foreach (var v in S().GetInstalledVoices())
+                {
+                    if (!v.Enabled) continue;
+                    var ci = v.VoiceInfo.Culture;
+                    list.Add(new string[] { v.VoiceInfo.Name, ci != null ? ci.DisplayName : "" });
+                }
+            }
+            catch { }
+            return list;
+        }
+        // Friendly label for a stored voice name ("" = automatic).
+        public static string VoiceLabel(string voiceName)
+        {
+            if (string.IsNullOrEmpty(voiceName)) return AutoVoice;
+            foreach (var inf in VoiceInfos())
+                if (inf[0] == voiceName) return inf[1].Length > 0 ? inf[0] + "   ·   " + inf[1] : inf[0];
+            return voiceName;
+        }
         public static void Speak(string text, string langCode)
         {
             if (!Config.S.EnableTts) return;
@@ -457,28 +482,83 @@ namespace QuickTranslator
             try
             {
                 var sy = S(); sy.SpeakAsyncCancelAll();
-                if (!string.IsNullOrEmpty(voice)) { try { sy.SelectVoice(voice); } catch { } }
-                sy.SpeakAsync("This is a voice preview. Hello!");
+                string two = null;
+                if (!string.IsNullOrEmpty(voice)) { try { sy.SelectVoice(voice); } catch { } two = VoiceLang(sy, voice); }
+                sy.SpeakAsync(SampleFor(two));   // greet in the voice's own language so the preview sounds right
             }
             catch { }
         }
+        static string SampleFor(string two)
+        {
+            switch (two)
+            {
+                case "es": return "Hola, esta es una vista previa de la voz.";
+                case "ar": return "مرحبًا، هذه معاينة للصوت.";
+                case "fr": return "Bonjour, ceci est un aperçu de la voix.";
+                case "de": return "Hallo, dies ist eine Sprachvorschau.";
+                case "it": return "Ciao, questa è un'anteprima della voce.";
+                case "pt": return "Olá, esta é uma prévia da voz.";
+                case "ru": return "Привет, это предварительный просмотр голоса.";
+                case "zh": return "你好，这是语音预览。";
+                case "ja": return "こんにちは、これは音声のプレビューです。";
+                case "ko": return "안녕하세요, 이것은 음성 미리듣기입니다.";
+                case "hi": return "नमस्ते, यह आवाज़ का पूर्वावलोकन है।";
+                case "nl": return "Hallo, dit is een spraakvoorbeeld.";
+                case "tr": return "Merhaba, bu bir ses önizlemesidir.";
+                case "pl": return "Cześć, to jest podgląd głosu.";
+                case "sv": return "Hej, det här är en förhandsgranskning av rösten.";
+                case "he": return "שלום, זוהי תצוגה מקדימה של הקול.";
+                default: return "This is a voice preview. Hello!";
+            }
+        }
         static void SelectVoice(System.Speech.Synthesis.SpeechSynthesizer sy, string langCode)
         {
-            if (!string.IsNullOrEmpty(Config.S.Voice)) { try { sy.SelectVoice(Config.S.Voice); return; } catch { } }
-            if (!string.IsNullOrEmpty(langCode) && langCode != "auto")
+            string two = TwoLetter(langCode);
+
+            // The user's chosen voice is honored only for the language it actually speaks.
+            // Forcing e.g. an English voice onto Arabic text reads it terribly, so for every
+            // other language we auto-pick a matching installed voice. The user never has to
+            // think about which voice suits which language.
+            if (!string.IsNullOrEmpty(Config.S.Voice) && (two == null || VoiceLang(sy, Config.S.Voice) == two))
             {
-                string two = langCode.Length >= 2 ? langCode.Substring(0, 2).ToLower() : langCode.ToLower();
-                try
-                {
-                    foreach (var v in sy.GetInstalledVoices())
-                    {
-                        if (!v.Enabled) continue;
-                        var ci = v.VoiceInfo.Culture;
-                        if (ci != null && ci.TwoLetterISOLanguageName.ToLower() == two) { sy.SelectVoice(v.VoiceInfo.Name); return; }
-                    }
-                }
-                catch { }
+                try { sy.SelectVoice(Config.S.Voice); return; } catch { }
             }
+
+            if (two != null && SelectByLang(sy, two)) return;
+
+            // No voice matches this language: prefer the chosen voice over the OS default,
+            // then fall back to whatever the synthesizer defaults to.
+            if (!string.IsNullOrEmpty(Config.S.Voice)) { try { sy.SelectVoice(Config.S.Voice); } catch { } }
+        }
+        static string TwoLetter(string langCode)
+        {
+            if (string.IsNullOrEmpty(langCode) || langCode == "auto") return null;
+            return (langCode.Length >= 2 ? langCode.Substring(0, 2) : langCode).ToLower();
+        }
+        static string VoiceLang(System.Speech.Synthesis.SpeechSynthesizer sy, string voiceName)
+        {
+            try
+            {
+                foreach (var v in sy.GetInstalledVoices())
+                    if (v.VoiceInfo.Name == voiceName)
+                        return v.VoiceInfo.Culture != null ? v.VoiceInfo.Culture.TwoLetterISOLanguageName.ToLower() : null;
+            }
+            catch { }
+            return null;
+        }
+        static bool SelectByLang(System.Speech.Synthesis.SpeechSynthesizer sy, string two)
+        {
+            try
+            {
+                foreach (var v in sy.GetInstalledVoices())
+                {
+                    if (!v.Enabled) continue;
+                    var ci = v.VoiceInfo.Culture;
+                    if (ci != null && ci.TwoLetterISOLanguageName.ToLower() == two) { sy.SelectVoice(v.VoiceInfo.Name); return true; }
+                }
+            }
+            catch { }
+            return false;
         }
         static string StripEmoji(string s)
         {
@@ -1560,16 +1640,23 @@ namespace QuickTranslator
             AddToggle(p, "Enable OCR (capture text from screen)", delegate { return Config.S.EnableOcr; }, delegate (bool v) { Config.S.EnableOcr = v; if (App.Rebuild != null) App.Rebuild(); }, ref y);
             var vLbl = new Label(); vLbl.Text = "Voice"; vLbl.Font = Theme.F(9.5f); vLbl.ForeColor = Theme.Text; vLbl.AutoSize = true; vLbl.Left = 0; vLbl.Top = y + 8; p.Controls.Add(vLbl);
             var vBtn = new RButton(); vBtn.Align = ContentAlignment.MiddleLeft; vBtn.Fill = Theme.Card; vBtn.Hover = Theme.Card2; vBtn.Left = 110; vBtn.Top = y; vBtn.Width = 200; vBtn.Height = 32; vBtn.Font = Theme.F(9.5f);
-            vBtn.Text = "  " + (string.IsNullOrEmpty(Config.S.Voice) ? "Auto (match language)" : Config.S.Voice);
+            vBtn.Text = "  " + Tts.VoiceLabel(Config.S.Voice);
             vBtn.Click += delegate {
-                var opts = new List<string>(); opts.Add("Auto (match language)"); opts.AddRange(Tts.Voices());
-                string cur = string.IsNullOrEmpty(Config.S.Voice) ? "Auto (match language)" : Config.S.Voice;
+                var map = new Dictionary<string, string>();              // display label -> stored voice name ("" = auto)
+                var opts = new List<string>(); opts.Add(Tts.AutoVoice); map[Tts.AutoVoice] = "";
+                foreach (var inf in Tts.VoiceInfos())
+                {
+                    string disp = inf[1].Length > 0 ? inf[0] + "   ·   " + inf[1] : inf[0];
+                    opts.Add(disp); map[disp] = inf[0];
+                }
+                string cur = Tts.VoiceLabel(Config.S.Voice);
                 string r = ListDialog.Pick(this, "Choose a voice", opts.ToArray(), cur);
-                if (r != null) { Config.S.Voice = (r == "Auto (match language)") ? "" : r; Config.Save(); vBtn.Text = "  " + r; }
+                if (r != null && map.ContainsKey(r)) { Config.S.Voice = map[r]; Config.Save(); vBtn.Text = "  " + r; }
             };
             var prev = new RButton(); prev.Text = "Preview"; prev.Fill = Theme.Accent; prev.Hover = Theme.AccentH; prev.Left = 320; prev.Top = y; prev.Width = 80; prev.Height = 32; prev.Font = Theme.F(9f);
             prev.Click += delegate { Tts.Preview(Config.S.Voice); };
-            p.Controls.Add(vBtn); p.Controls.Add(prev); y += 50;
+            p.Controls.Add(vBtn); p.Controls.Add(prev);
+            p.Controls.Add(Sub("Your voice is used for its own language; other languages auto-match.", y + 38)); y += 64;
 
             p.Controls.Add(Head("Default languages", y)); y += 30;
             p.Controls.Add(Sub("On selected text  (shortcut with a selection)", y)); y += 22;
